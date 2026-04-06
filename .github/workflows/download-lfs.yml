@@ -1,0 +1,176 @@
+name: Download Files and Store with LFS
+
+on:
+  push:
+    paths:
+      - "download-list.txt" # Triggers when the URL list is updated
+  workflow_dispatch:
+    inputs:
+      urls:
+        description: "Extra URLs to download (one per line)"
+        required: false
+        default: ""
+
+jobs:
+  download-and-store:
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout ────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # ── 2. Git LFS setup ───────────────────────────────────────────────────
+      - name: Set up Git LFS
+        run: git lfs install
+
+      # ── 3. Git identity ────────────────────────────────────────────────────
+      - name: Configure Git
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── 4. Build the final URL list ────────────────────────────────────────
+      - name: Build URL list
+        id: urls
+        run: |
+          # Start with URLs from download-list.txt (strip comments + blank lines)
+          if [ -f download-list.txt ]; then
+            grep -v '^\s*#' download-list.txt | grep -v '^\s*$' > /tmp/all-urls.txt
+          else
+            touch /tmp/all-urls.txt
+          fi
+
+          # Append any URLs passed via workflow_dispatch input
+          if [ -n "${{ github.event.inputs.urls }}" ]; then
+            echo "${{ github.event.inputs.urls }}" \
+              | grep -v '^\s*#' \
+              | grep -v '^\s*$' \
+              >> /tmp/all-urls.txt
+          fi
+
+          # Deduplicate
+          sort -u /tmp/all-urls.txt -o /tmp/all-urls.txt
+
+          echo "──────────────── URLs to process ────────────────"
+          cat /tmp/all-urls.txt
+          echo "─────────────────────────────────────────────────"
+
+          COUNT=$(wc -l < /tmp/all-urls.txt)
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+
+      # ── 5. Download files into extension-based directories ─────────────────
+      - name: Download files
+        run: |
+          FAILED=0
+
+          while IFS= read -r URL || [ -n "$URL" ]; do
+            # Clean up the URL
+            URL=$(echo "$URL" | xargs)
+            [ -z "$URL" ] && continue
+
+            # Extract filename (strip query strings / fragments)
+            FILENAME=$(basename "$URL" | sed 's/[?#].*//')
+
+            # Determine extension (lowercase), fallback to 'misc'
+            EXT=$(echo "${FILENAME##*.}" | tr '[:upper:]' '[:lower:]')
+            if [ "$EXT" = "$FILENAME" ] || [ -z "$EXT" ]; then
+              EXT="misc"
+            fi
+
+            # Map extension to a directory
+            case "$EXT" in
+              # Video
+              mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpeg|mpg)
+                DIR="files/video" ;;
+              # Audio
+              mp3|wav|flac|aac|ogg|wma|m4a|opus)
+                DIR="files/audio" ;;
+              # Images
+              jpg|jpeg|png|gif|bmp|svg|webp|ico|tiff|tif|heic|avif)
+                DIR="files/images" ;;
+              # Documents
+              pdf|doc|docx|xls|xlsx|ppt|pptx|odt|ods|odp|txt|rtf|csv|md)
+                DIR="files/documents" ;;
+              # Archives
+              zip|tar|gz|bz2|xz|7z|rar|tgz|zst)
+                DIR="files/archives" ;;
+              # Code / data
+              json|xml|yaml|yml|toml|ini|sql|html|htm|css|js|ts|py|sh)
+                DIR="files/data" ;;
+              # Binaries / executables
+              bin|exe|dmg|iso|img|deb|rpm|apk|msi|appimage)
+                DIR="files/binaries" ;;
+              # Fonts
+              ttf|otf|woff|woff2|eot)
+                DIR="files/fonts" ;;
+              # Everything else
+              *)
+                DIR="files/misc" ;;
+            esac
+
+            mkdir -p "$DIR"
+            DEST="$DIR/$FILENAME"
+
+            # Skip if already exists
+            if [ -f "$DEST" ]; then
+              echo "⏭  Skipping (already exists): $DEST"
+              continue
+            fi
+
+            echo "⬇  Downloading: $URL"
+            echo "   → $DEST"
+
+            if curl -fsSL \
+                --retry 3 \
+                --retry-delay 5 \
+                --connect-timeout 30 \
+                --max-time 300 \
+                -o "$DEST" \
+                "$URL"; then
+              echo "✅ Done: $DEST"
+            else
+              echo "❌ Failed: $URL"
+              rm -f "$DEST"
+              FAILED=$((FAILED + 1))
+            fi
+
+          done < /tmp/all-urls.txt
+
+          if [ "$FAILED" -gt 0 ]; then
+            echo ""
+            echo "⚠️  $FAILED file(s) failed to download."
+            exit 1
+          fi
+
+      # ── 6. Auto-track all file extensions found via LFS ────────────────────
+      - name: Track files with Git LFS
+        run: |
+          # Dynamically track every extension found under files/
+          find files/ -type f | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]' \
+            | sort -u \
+            | while read -r EXT; do
+                echo "🔧 Tracking *.${EXT} with LFS"
+                git lfs track "**/*.${EXT}"
+              done
+
+          git add .gitattributes
+
+      # ── 7. Commit and push ─────────────────────────────────────────────────
+      - name: Commit and push
+        run: |
+          git add files/
+
+          if git diff --cached --quiet; then
+            echo "✅ Nothing new to commit."
+          else
+            ADDED=$(git diff --cached --name-only | wc -l)
+            git commit -m "feat(lfs): add $ADDED downloaded file(s) [$(date -u '+%Y-%m-%d %H:%M UTC')]"
+            git push
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
