@@ -1,0 +1,5 @@
+# Lines starting with # are comments and will be ignored
+# One URL per line
+
+https://downloads.cursor.com/production/a80ff7dfcaa45d7750f6e30be457261379c29b06/darwin/arm64/Cursor-darwin-arm64.dmg
+https://filestore.fortinet.com/forticlient/downloads/forticlient_vpn_7.4.3.1736_amd64.deb
