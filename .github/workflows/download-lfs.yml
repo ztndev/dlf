@@ -146,19 +146,24 @@ jobs:
             echo "⚠️  $FAILED file(s) failed to download."
             exit 1
           fi
-
+          
       # ── 6. Auto-track all file extensions found via LFS ────────────────────
       - name: Track files with Git LFS
         run: |
-          # Dynamically track every extension found under files/
-          find files/ -type f | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]' \
+          # Dynamically track every extension found under files/, skip .gitkeep
+          find files/ -type f ! -name ".gitkeep" | sed 's/.*\.//' | tr '[:upper:]' '[:lower:]' \
             | sort -u \
             | while read -r EXT; do
                 echo "🔧 Tracking *.${EXT} with LFS"
                 git lfs track "**/*.${EXT}"
               done
 
+          # Explicitly make sure .gitkeep is never LFS tracked
+          grep -v '\.gitkeep' .gitattributes > /tmp/.gitattributes.tmp && \
+            mv /tmp/.gitattributes.tmp .gitattributes
+
           git add .gitattributes
+
 
       # ── 7. Commit and push ─────────────────────────────────────────────────
       - name: Commit and push
